@@ -1,0 +1,133 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: defectdojo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: defectdojo
+      POSTGRES_USER: defectdojo
+      POSTGRES_PASSWORD: ${DD_DATABASE_PASSWORD:-CHANGE_THIS_DB_PASSWORD}
+    volumes:
+      - defectdojo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U defectdojo -d defectdojo"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:7-alpine
+    container_name: defectdojo-valkey
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  initializer:
+    image: defectdojo/defectdojo-django:latest
+    container_name: defectdojo-initializer
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    environment: &defectdojo_env
+      DD_SECRET_KEY: ${DD_SECRET_KEY:-CHANGE_THIS_TO_A_LONG_RANDOM_SECRET}
+      DD_CREDENTIAL_AES_256_KEY: ${DD_CREDENTIAL_AES_256_KEY:-CHANGE_THIS_TO_A_32_BYTE_RANDOM_VALUE}
+      # Updated to include your specific domain
+      DD_ALLOWED_HOSTS: "localhost,127.0.0.1,defectdojo.yourdomain.com"
+      DD_DATABASE_URL: "postgres://defectdojo:${DD_DATABASE_PASSWORD:-CHANGE_THIS_DB_PASSWORD}@postgres:5432/defectdojo"
+      DD_CELERY_BROKER_URL: "redis://valkey:6379/0"
+      DD_CELERY_RESULT_BACKEND: "redis://valkey:6379/0"
+      DD_DEBUG: "False"
+      DD_INITIALIZE: "true"
+    volumes:
+      - defectdojo_media:/app/media
+      - defectdojo_static:/app/static
+    command: /bin/bash -c "/entrypoint-initializer.sh"
+
+  uwsgi:
+    image: defectdojo/defectdojo-django:latest
+    container_name: defectdojo-uwsgi
+    restart: unless-stopped
+    depends_on:
+      initializer:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    environment:
+      <<: *defectdojo_env
+      DD_INITIALIZE: "false"
+    volumes:
+      - defectdojo_media:/app/media
+      - defectdojo_static:/app/static
+
+  celeryworker:
+    image: defectdojo/defectdojo-django:latest
+    container_name: defectdojo-celeryworker
+    restart: unless-stopped
+    depends_on:
+      initializer:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    environment:
+      <<: *defectdojo_env
+      DD_INITIALIZE: "false"
+    command: /bin/bash -c "celery -A dojo worker -l info --concurrency 2"
+
+  celerybeat:
+    image: defectdojo/defectdojo-django:latest
+    container_name: defectdojo-celerybeat
+    restart: unless-stopped
+    depends_on:
+      initializer:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    environment:
+      <<: *defectdojo_env
+      DD_INITIALIZE: "false"
+    command: /bin/bash -c "celery -A dojo beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler"
+
+  nginx:
+    image: defectdojo/defectdojo-nginx:latest
+    container_name: defectdojo-nginx
+    restart: unless-stopped
+    depends_on:
+      uwsgi:
+        condition: service_started
+    environment:
+      NGINX_METRICS_ENABLED: "false"
+      DD_UWSGI_HOST: uwsgi
+      DD_UWSGI_PORT: "3031"
+    networks:
+      - default
+      - traefik_frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.defectdojo.rule=Host(`defectdojo.selfsigned.ch`)"
+      - "traefik.http.routers.defectdojo.entrypoints=websecure"
+      - "traefik.http.routers.defectdojo.tls=true"
+      - "traefik.http.services.defectdojo.loadbalancer.server.port=8080"
+    volumes:
+      - defectdojo_media:/usr/share/nginx/html/media
+      - defectdojo_static:/usr/share/nginx/html/static
+
+networks:
+  traefik_frontend:
+    external: true
+
+volumes:
+  defectdojo_postgres_data:
+  defectdojo_media:
+  defectdojo_static:
