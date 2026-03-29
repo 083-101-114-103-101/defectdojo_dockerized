@@ -1,0 +1,14 @@
+# Umgebungsvariablen (Sensible Daten - niemals committen!)
+.env
+.env.*
+!.env.example
+
+# IDE und Editor Konfigurationen
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Betriebssystem-spezifische Dateien
+.DS_Store
+Thumbs.db
